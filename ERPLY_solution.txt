@@ -1,22 +1,3 @@
-/*
- * Candidate: Ahmed Shalaby
- * Date: 2026-01-07
- * Application: ERPLY Books Java Test Task
- * 
- * Goal: Identify customers whose payment behavior has worsened compared to the previous year.
- * 
- * Assumptions:
- * 1. "Worsened" behavior is defined strictly as:
- *    - In 2024, ALL payments for a customer's invoices were made on or before the invoice deadline.
- *    - In the current period (assumed 2025 onwards), the customer has at least one invoice paid LATE or currently OVERDUE.
- * 2. "Deadline" comparisons use the invoice's `deadlineDate`. If missing, we assume no deadline (not late).
- * 3. Payment matching: Payments are matched to invoices via `invoiceId`. 
- *    - If multiple payments exist for one invoice, we sum them up chronologically. The date the total reaches `sumWithVat` is the "paid date".
- * 4. Customers with no activity in the current period are NOT counted as "worsened".
- * 5. External Libraries: Uses Jackson for JSON parsing (as used in the project). 
- *    Standard Java 11+ HttpClient is used.
- */
-
 /* ==================================================================================
    FILE 1: PaymentBehaviorAnalyzer.java
    Main logic class containing the required method.
@@ -42,7 +23,7 @@ public class PaymentBehaviorAnalyzer {
         // assuming current period starts from 2025-01-01
         String startCurrent = "2025-01-01T00:00:00";
         // Future proofing end date for "current period"
-        String endCurrent = "2026-12-31T23:59:59"; 
+        String endCurrent = "2025-12-31T23:59:59"; 
 
         try {
             // 1. Fetch Data

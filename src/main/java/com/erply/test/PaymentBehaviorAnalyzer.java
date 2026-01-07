@@ -12,7 +12,7 @@ public class PaymentBehaviorAnalyzer {
         String end2024 = "2024-12-31T23:59:59";
         // assuming current period starts from 2025-01-01
         String startCurrent = "2025-01-01T00:00:00";
-        String endCurrent = "2026-12-31T23:59:59"; // Future proofing for the "current period"
+        String endCurrent = "2025-12-31T23:59:59"; // Future proofing for the "current period"
 
         try {
             // Fetch Data

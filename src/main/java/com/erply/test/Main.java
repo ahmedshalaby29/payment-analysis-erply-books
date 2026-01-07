@@ -14,7 +14,15 @@ public class Main {
             
             // Read .env file manually
             String token = null;
-            List<String> lines = Files.readAllLines(Paths.get("/Users/ahmedshalaby/Documents/ERPLY books/.env"));
+            java.nio.file.Path envPath = Paths.get(".env");
+            System.out.println("Reading .env from: " + envPath.toAbsolutePath());
+            
+            if (!Files.exists(envPath)) {
+                 System.err.println(".env file not found at " + envPath.toAbsolutePath());
+                 return;
+            }
+
+            List<String> lines = Files.readAllLines(envPath);
             for (String line : lines) {
                 if (line.startsWith("API_TOKEN=")) {
                     token = line.substring("API_TOKEN=".length()).trim();
