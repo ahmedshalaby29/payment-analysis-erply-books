@@ -1,0 +1,356 @@
+/*
+ * Candidate: Ahmed Shalaby
+ * Date: 2026-01-07
+ * Application: ERPLY Books Java Test Task
+ * 
+ * Goal: Identify customers whose payment behavior has worsened compared to the previous year.
+ * 
+ * Assumptions:
+ * 1. "Worsened" behavior is defined strictly as:
+ *    - In 2024, ALL payments for a customer's invoices were made on or before the invoice deadline.
+ *    - In the current period (assumed 2025 onwards), the customer has at least one invoice paid LATE or currently OVERDUE.
+ * 2. "Deadline" comparisons use the invoice's `deadlineDate`. If missing, we assume no deadline (not late).
+ * 3. Payment matching: Payments are matched to invoices via `invoiceId`. 
+ *    - If multiple payments exist for one invoice, we sum them up chronologically. The date the total reaches `sumWithVat` is the "paid date".
+ * 4. Customers with no activity in the current period are NOT counted as "worsened".
+ * 5. External Libraries: Uses Jackson for JSON parsing (as used in the project). 
+ *    Standard Java 11+ HttpClient is used.
+ */
+
+/* ==================================================================================
+   FILE 1: PaymentBehaviorAnalyzer.java
+   Main logic class containing the required method.
+   ================================================================================== */
+package com.erply.test;
+
+import java.util.*;
+import java.util.stream.Collectors;
+
+public class PaymentBehaviorAnalyzer {
+
+    /**
+     * Identifies customers who paid on time in 2024 but are late in the current period.
+     * @param token API Token for ERPLY Books
+     * @return List of customer names meeting the criteria
+     */
+    public List<String> findCustomersWithWorsenedPayments(String token) {
+        ErplyApiClient client = new ErplyApiClient(token);
+
+        // Define periods
+        String start2024 = "2024-01-01T00:00:00";
+        String end2024 = "2024-12-31T23:59:59";
+        // assuming current period starts from 2025-01-01
+        String startCurrent = "2025-01-01T00:00:00";
+        // Future proofing end date for "current period"
+        String endCurrent = "2026-12-31T23:59:59"; 
+
+        try {
+            // 1. Fetch Data
+            List<Invoice> invoices2024 = client.getInvoices(start2024, end2024);
+            List<Invoice> invoicesCurrent = client.getInvoices(startCurrent, endCurrent);
+            
+            // Fetch all payments covering both periods to ensure we catch payments made in 'current' for '2024' invoices if needed, 
+            // though strictly the prompt implies analyzing invoices OF 2024 vs invoices OF current period.
+            // We fetch payments for the whole range.
+            List<Payment> allPayments = client.getPayments(start2024, endCurrent);
+
+            // 2. Index payments by Invoice ID for fast lookup
+            Map<Long, List<Payment>> paymentsByInvoice = allPayments.stream()
+                    .filter(p -> p.getInvoiceId() != null)
+                    .collect(Collectors.groupingBy(Payment::getInvoiceId));
+
+            // 3. Identify "Good Customers" in 2024
+            // A good customer had invoices in 2024 AND paid them ALL on time.
+            Map<Long, List<Invoice>> invoices2024ByCustomer = invoices2024.stream()
+                    .collect(Collectors.groupingBy(Invoice::getCustomerId));
+
+            Set<Long> goodCustomerIds2024 = new HashSet<>();
+
+            for (Map.Entry<Long, List<Invoice>> entry : invoices2024ByCustomer.entrySet()) {
+                Long customerId = entry.getKey();
+                List<Invoice> invoices = entry.getValue();
+                
+                boolean allPaidOnTime = invoices.stream().allMatch(inv -> isPaidOnTime(inv, paymentsByInvoice.get(inv.getId())));
+                
+                // Must have at least one invoice to be "measured" as good, prevent empty set issues
+                if (allPaidOnTime && !invoices.isEmpty()) {
+                    goodCustomerIds2024.add(customerId);
+                }
+            }
+
+            // 4. Check Current Period Behavior for these specific customers
+            List<String> worsenedCustomers = new ArrayList<>();
+            
+            // Helper map for names
+            Map<Long, String> customerNames = new HashMap<>();
+            invoices2024.forEach(inv -> customerNames.putIfAbsent(inv.getCustomerId(), inv.getCustomerName()));
+            invoicesCurrent.forEach(inv -> customerNames.putIfAbsent(inv.getCustomerId(), inv.getCustomerName()));
+
+            Map<Long, List<Invoice>> invoicesCurrentByCustomer = invoicesCurrent.stream()
+                    .collect(Collectors.groupingBy(Invoice::getCustomerId));
+
+            for (Long customerId : goodCustomerIds2024) {
+                List<Invoice> currentInvoices = invoicesCurrentByCustomer.get(customerId);
+                
+                if (currentInvoices == null || currentInvoices.isEmpty()) {
+                    continue; // No activity in current period, so behavior hasn't "worsened" (just stopped).
+                }
+
+                boolean hasLatePayment = currentInvoices.stream().anyMatch(inv -> isLate(inv, paymentsByInvoice.get(inv.getId())));
+                
+                if (hasLatePayment) {
+                    worsenedCustomers.add(customerNames.getOrDefault(customerId, "Unknown Customer " + customerId));
+                }
+            }
+
+            return worsenedCustomers;
+
+        } catch (Exception e) {
+            e.printStackTrace();
+            return Collections.emptyList();
+        }
+    }
+
+    /**
+     * Checks if an invoice was fully paid on or before its deadline.
+     */
+    private boolean isPaidOnTime(Invoice invoice, List<Payment> payments) {
+        if (invoice.getDeadlineDate() == null) return true; // No deadline = on time
+        
+        if (payments == null || payments.isEmpty()) {
+             // If no payments found, it's only "on time" if it was free or handled otherwise? 
+             // Usually unpaid = not paid on time.
+             // Exception: Credit invoices or zero sum? assuming standard positive invoices.
+             return invoice.getSumPaid() != null && invoice.getSumPaid() >= invoice.getSumWithVat();
+        }
+
+        // Calculate when it was fully paid
+        java.time.LocalDate paidFullDate = getFullPaymentDate(invoice, payments);
+
+        if (paidFullDate == null) {
+            return false; // Never fully paid
+        }
+
+        return !paidFullDate.isAfter(invoice.getDeadlineDate());
+    }
+
+    /**
+     * Checks if an invoice is "Late".
+     * Late means:
+     * 1. Paid, but the payment date was AFTER the deadline.
+     * 2. Not fully paid yet, and today is AFTER the deadline.
+     */
+    private boolean isLate(Invoice invoice, List<Payment> payments) {
+        if (invoice.getDeadlineDate() == null) return false;
+
+        java.time.LocalDate paidFullDate = getFullPaymentDate(invoice, payments);
+
+        if (paidFullDate != null) {
+            // It is paid. Was it late?
+            return paidFullDate.isAfter(invoice.getDeadlineDate());
+        } else {
+            // Not fully paid. Is it overdue?
+            return java.time.LocalDate.now().isAfter(invoice.getDeadlineDate());
+        }
+    }
+
+    /**
+     * Helper to find the date the invoice was fully paid.
+     * Handles partial payments by sorting them and finding when the cumulative sum reached the total.
+     */
+    private java.time.LocalDate getFullPaymentDate(Invoice invoice, List<Payment> payments) {
+        if (payments == null || payments.isEmpty()) return null;
+
+        double needed = invoice.getSumWithVat();
+        double paidSoFar = 0;
+        
+        // Sort payments by date to find the accurate "completion" date
+        payments.sort(Comparator.comparing(Payment::getOpDate));
+
+        for (Payment p : payments) {
+            paidSoFar += p.getSumPaid();
+            if (paidSoFar >= needed - 0.01) { // 0.01 tolerance for floating point
+                return p.getOpDate();
+            }
+        }
+        return null; // Sum never reached total
+    }
+}
+
+
+/* ==================================================================================
+   FILE 2: ErplyApiClient.java
+   Handles HTTP requests to the ERPLY Books API.
+   ================================================================================== */
+package com.erply.test;
+
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.util.List;
+
+public class ErplyApiClient {
+    private final String apiToken;
+    private final HttpClient httpClient;
+    private final ObjectMapper objectMapper;
+    private static final String BASE_URL = "https://api.erplybooks.com/api";
+
+    public ErplyApiClient(String apiToken) {
+        this.apiToken = apiToken;
+        this.httpClient = HttpClient.newHttpClient();
+        this.objectMapper = new ObjectMapper();
+        this.objectMapper.findAndRegisterModules(); // Supports Java 8 LocalDate (JSR310)
+    }
+
+    public List<Invoice> getInvoices(String start, String end) {
+        // Document Type 'DOCUMENT_SELL' fetches sales invoices
+        String url = String.format("%s/invoices?dateFrom=%s&dateTo=%s&documentType=DOCUMENT_SELL&limit=10000", BASE_URL, start, end);
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(url))
+                    .header("X-API-TOKEN", apiToken)
+                    .GET()
+                    .build();
+
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() != 200) {
+                throw new RuntimeException("Failed to fetch invoices: " + response.statusCode() + " " + response.body());
+            }
+
+            EntityListResponse<Invoice> wrapper = objectMapper.readValue(response.body(), new TypeReference<EntityListResponse<Invoice>>() {});
+            return wrapper.getItems() != null ? wrapper.getItems() : List.of();
+        } catch (Exception e) {
+            throw new RuntimeException("Error fetching invoices", e);
+        }
+    }
+
+    public List<Payment> getPayments(String start, String end) {
+         String url = String.format("%s/payments?dateFrom=%s&dateTo=%s&limit=10000&getEverything=true", BASE_URL, start, end);
+        try {
+             HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(url))
+                    .header("X-API-TOKEN", apiToken)
+                    .GET()
+                    .build();
+
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() != 200) {
+                throw new RuntimeException("Failed to fetch payments: " + response.statusCode() + " " + response.body());
+            }
+
+            EntityListResponse<Payment> wrapper = objectMapper.readValue(response.body(), new TypeReference<EntityListResponse<Payment>>() {});
+            return wrapper.getItems() != null ? wrapper.getItems() : List.of();
+        } catch (Exception e) {
+            throw new RuntimeException("Error fetching payments", e);
+        }
+    }
+}
+
+
+/* ==================================================================================
+   FILE 3: Invoice.java
+   DTO for Invoice data.
+   ================================================================================== */
+package com.erply.test;
+
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import java.time.LocalDate;
+
+@JsonIgnoreProperties(ignoreUnknown = true)
+public class Invoice {
+    private Long id;
+    private String number;
+    private LocalDate date;
+    private LocalDate deadlineDate;
+    private Long customerId;
+    private String customerName;
+    private Double sumWithVat;
+    private Double sumPaid;
+    private String typeCode; 
+
+    public Long getId() { return id; }
+    public void setId(Long id) { this.id = id; }
+
+    public String getNumber() { return number; }
+    public void setNumber(String number) { this.number = number; }
+
+    public LocalDate getDate() { return date; }
+    public void setDate(LocalDate date) { this.date = date; }
+
+    public LocalDate getDeadlineDate() { return deadlineDate; }
+    public void setDeadlineDate(LocalDate deadlineDate) { this.deadlineDate = deadlineDate; }
+
+    public Long getCustomerId() { return customerId; }
+    public void setCustomerId(Long customerId) { this.customerId = customerId; }
+
+    public String getCustomerName() { return customerName; }
+    public void setCustomerName(String customerName) { this.customerName = customerName; }
+
+    public Double getSumWithVat() { return sumWithVat; }
+    public void setSumWithVat(Double sumWithVat) { this.sumWithVat = sumWithVat; }
+
+    public Double getSumPaid() { return sumPaid; }
+    public void setSumPaid(Double sumPaid) { this.sumPaid = sumPaid; }
+
+    public String getTypeCode() { return typeCode; }
+    public void setTypeCode(String typeCode) { this.typeCode = typeCode; }
+}
+
+
+/* ==================================================================================
+   FILE 4: Payment.java
+   DTO for Payment data.
+   ================================================================================== */
+package com.erply.test;
+
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import java.time.LocalDate;
+
+@JsonIgnoreProperties(ignoreUnknown = true)
+public class Payment {
+    private Long id;
+    private Long invoiceId;
+    private LocalDate opDate; // Payment date
+    private Double sumPaid;
+    private Long customerId;
+
+    public Long getId() { return id; }
+    public void setId(Long id) { this.id = id; }
+    
+    public Long getInvoiceId() { return invoiceId; }
+    public void setInvoiceId(Long invoiceId) { this.invoiceId = invoiceId; }
+    
+    public LocalDate getOpDate() { return opDate; }
+    public void setOpDate(LocalDate opDate) { this.opDate = opDate; }
+    
+    public Double getSumPaid() { return sumPaid; }
+    public void setSumPaid(Double sumPaid) { this.sumPaid = sumPaid; }
+
+    public Long getCustomerId() { return customerId; }
+    public void setCustomerId(Long customerId) { this.customerId = customerId; }
+}
+
+
+/* ==================================================================================
+   FILE 5: EntityListResponse.java
+   Wrapper for list responses from the API.
+   ================================================================================== */
+package com.erply.test;
+
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import java.util.List;
+
+@JsonIgnoreProperties(ignoreUnknown = true)
+public class EntityListResponse<T> {
+    private List<T> items;
+    private Integer totalCount;
+
+    public List<T> getItems() { return items; }
+    public void setItems(List<T> items) { this.items = items; }
+
+    public Integer getTotalCount() { return totalCount; }
+    public void setTotalCount(Integer totalCount) { this.totalCount = totalCount; }
+}
